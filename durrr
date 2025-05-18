@@ -1,0 +1,267 @@
+- Services
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UIS = game:GetService("UserInputService")
+local Camera = workspace.CurrentCamera
+local LocalPlayer = Players.LocalPlayer
+
+-- Initialize metatable hook
+local grm = getrawmetatable(game)
+local oldindex = grm.__index
+setreadonly(grm, false)
+
+-- Variables
+local AimbotActive = false
+local Target = nil
+local SilentTarget = nil
+local isTyping = false
+
+-- Typing detection
+UIS.TextBoxFocused:Connect(function() isTyping = true end)
+UIS.TextBoxFocusReleased:Connect(function() isTyping = false end)
+
+-- Utility functions
+local Utility = {}
+
+function Utility:CalculateVelocity(Part, Type)
+    if not Type then 
+        return Part.Velocity
+    else 
+        local OldPosition = Part.Position
+        local OldTime = tick()
+        task.wait()
+        local NewPosition = Part.Position
+        local NewTime = tick()
+        return (NewPosition - OldPosition) / (NewTime - OldTime)
+    end
+end
+
+-- Validation checks
+local function IsPlayerValid(player)
+    if not player or not player.Character then return false end
+    
+    local character = player.Character
+    local checks = getgenv().Etiquette.Checks
+    local hum = character:FindFirstChildOfClass("Humanoid")
+    
+    -- KO/Dead Check
+    if checks.Dead then
+        local bodyEffects = character:FindFirstChild("BodyEffects")
+        if bodyEffects and bodyEffects:FindFirstChild("K.O") and bodyEffects["K.O"].Value then
+            return false
+        end
+    end
+
+    -- Local Player Dead Check
+    if checks.ImDead and (not LocalPlayer.Character or not LocalPlayer.Character:FindFirstChildOfClass("Humanoid") or LocalPlayer.Character:FindFirstChildOfClass("Humanoid").Health <= 0) then
+        return false
+    end
+
+    -- Tool Held Check
+    if checks.ItemHeld then
+        local hasTool = false
+        for _, tool in ipairs(LocalPlayer.Character:GetChildren()) do
+            if tool:IsA("Tool") then
+                hasTool = true
+                break
+            end
+        end
+        if not hasTool then return false end
+    end
+
+    -- Chat Typing Check
+    if checks.ChatTyping and isTyping then
+        return false
+    end
+
+    return true
+end
+
+-- Target acquisition
+local VALID_PARTS = {
+    "Head", "UpperTorso", "LowerTorso", "HumanoidRootPart",
+    "LeftUpperArm", "LeftLowerArm", "LeftHand",
+    "RightUpperArm", "RightLowerArm", "RightHand",
+    "LeftUpperLeg", "LeftLowerLeg", "LeftFoot",
+    "RightUpperLeg", "RightLowerLeg", "RightFoot"
+}
+
+local function getClosestValidPart(character)
+    local closestPart, shortestDist = nil, math.huge
+    local mousePos = UIS:GetMouseLocation()
+    
+    for _, partName in ipairs(VALID_PARTS) do
+        local part = character:FindFirstChild(partName)
+        if part then
+            local screenPos, visible = Camera:WorldToViewportPoint(part.Position)
+            if visible then
+                local dist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+                if dist < shortestDist then
+                    shortestDist = dist
+                    closestPart = part
+                end
+            end
+        end
+    end
+    
+    return closestPart
+end
+
+local function getAimbotTargetPart(character)
+    local partMethod = getgenv().Etiquette.Aimbot.Settings.Targetting.AimbotMethod.PartMethod
+    return partMethod == "ClosestPart" and getClosestValidPart(character) or character:FindFirstChild(getgenv().Etiquette.Aimbot.Settings.Targetting.Part)
+end
+
+local function getSilentAimTargetPart(character)
+    local silentMethod = getgenv().Etiquette.Aimbot.Settings.Targetting.SilentMethod
+    local partMethod = silentMethod and silentMethod.PartMethod or "Normal"
+    return partMethod == "ClosestPart" and getClosestValidPart(character) or character:FindFirstChild(getgenv().Etiquette.SilentAim.Part)
+end
+
+local function getTarget()
+    local closestPlayer, shortestDist = nil, math.huge
+    local fovRadius = getgenv().Etiquette.Visuals.FOVIndicator.Radius or 66
+    local mousePos = UIS:GetMouseLocation()
+    
+    local disregardFOV = getgenv().Etiquette.Aimbot.Settings.Targetting.SilentMethod[1] == "Target" 
+                     and AimbotActive 
+                     and getgenv().Etiquette.SilentAim.Enabled
+
+    for _, player in ipairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character and IsPlayerValid(player) then
+            local part = getAimbotTargetPart(player.Character)
+            if part then
+                local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+                if onScreen or disregardFOV then
+                    local dist = (Vector2.new(screenPos.X, screenPos.Y) - mousePos).Magnitude
+                    if (disregardFOV or dist <= fovRadius) and dist < shortestDist then
+                        shortestDist = dist
+                        closestPlayer = player
+                    end
+                end
+            end
+        end
+    end
+    
+    return closestPlayer
+end
+
+-- Aiming functions
+local function aimAtTarget(player)
+    if not player or not player.Character then return end
+
+    local part = getAimbotTargetPart(player.Character)
+    if not part then return end
+
+    local pred = getgenv().Etiquette.Aimbot.Settings.Prediction
+    local traj = getgenv().Etiquette.Aimbot.Configuration.Trajectory
+    local drift = traj.Drift
+    local tremor = getgenv().Etiquette.Aimbot.Configuration.Tremor
+    local calc = traj.Calculation
+
+    local velocity
+    local method = getgenv().Etiquette.Aimbot.Settings.Targetting.AimbotMethod[1]
+
+    if method == "Reactive" then
+        local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+        velocity = humanoid and (humanoid.MoveDirection * humanoid.WalkSpeed) or Vector3.new(0, 0, 0)
+    elseif method == "Kinematic" then
+        velocity = Utility:CalculateVelocity(part, true)
+    else
+        velocity = part.Velocity
+    end
+
+    -- Calculate predicted position using trajectory calculations:
+    local predicted = part.Position
+        + Vector3.new(
+            velocity.X * pred.Horizontal * calc.Surge + calc.Offset,
+            velocity.Y * pred.Vertical * (1 + pred.Steepness) * calc.Inertia + calc.Offset,
+            velocity.Z * pred.Horizontal * calc.Depth + calc.Offset
+        )
+
+    if drift and drift.Enabled then
+        predicted = predicted + Vector3.new(drift.X, drift.Y, 0) -- Removed Z axis for drift
+    end
+
+    if tremor and tremor.Enabled then
+        predicted = predicted + Vector3.new(
+            (math.random() - 0.5) * tremor.Amplitude * tremor.Axes.X,
+            (math.random() - 0.5) * tremor.Amplitude * tremor.Axes.Y,
+            (math.random() - 0.5) * tremor.Amplitude * tremor.Axes.Z
+        )
+    end
+
+    local smoothPower = traj.Power
+    Camera.CFrame = Camera.CFrame:Lerp(
+        CFrame.new(Camera.CFrame.Position, predicted),
+        type(smoothPower) == "number" and smoothPower > 0 and smoothPower or 0.0145
+    )
+end
+
+-- Main loops
+RunService.Heartbeat:Connect(function()
+    if getgenv().Etiquette.SilentAim.Enabled then
+        SilentTarget = (Target and IsPlayerValid(Target)) and Target or getTarget()
+    else
+        SilentTarget = nil
+    end
+end)
+
+UIS.InputBegan:Connect(function(input, gameProcessed)
+    if not gameProcessed and input.KeyCode == Enum.KeyCode[getgenv().Etiquette.Aimbot.Settings.Targetting.Priority] then
+        AimbotActive = not AimbotActive
+        Target = AimbotActive and getTarget() or nil
+        SilentTarget = Target
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if getgenv().Etiquette.Aimbot.Active and getgenv().Etiquette.Aimbot.Settings.Enabled and AimbotActive then
+        if not Target or not Target.Character or not IsPlayerValid(Target) then
+            Target = getTarget()
+        end
+        
+        if Target and IsPlayerValid(Target) then
+            aimAtTarget(Target)
+        end
+    end
+end)
+
+grm.__index = function(self, Index)
+    if not checkcaller() and self == LocalPlayer:GetMouse() then
+        if (Index == "Hit" or Index == "Target") and getgenv().Etiquette.SilentAim.Enabled and AimbotActive and SilentTarget and SilentTarget.Character then
+            local part = getSilentAimTargetPart(SilentTarget.Character)
+            if part then
+                local predictedPos = part.Position
+                
+                -- Apply prediction if enabled
+                if getgenv().Etiquette.SilentAim.Prediction.Enabled then
+                    predictedPos = predictedPos + (part.Velocity * (getgenv().Etiquette.SilentAim.Prediction.Strength or 0))
+                end
+                
+                -- Apply clamping if using ClosestPart method
+                local silentMethod = getgenv().Etiquette.Aimbot.Settings.Targetting.SilentMethod
+                if silentMethod and silentMethod.PartMethod == "ClosestPart" then
+                    local mousePos = UIS:GetMouseLocation()
+                    local mouseRay = Camera:ViewportPointToRay(mousePos.X, mousePos.Y)
+                    
+                    -- Fixed this line - added missing parenthesis
+                    local transformed = part.CFrame:PointToObjectSpace(
+                        mouseRay.Origin + (mouseRay.Direction * mouseRay.Direction:Dot(part.CFrame.Position - mouseRay.Origin)))
+                    
+                    local partSize = part.Size * (0.93 / 2)
+                    local clamped = Vector3.new(
+                        math.clamp(transformed.X, -partSize.X, partSize.X),
+                        math.clamp(transformed.Y, -partSize.Y, partSize.Y),
+                        math.clamp(transformed.Z, -partSize.Z, partSize.Z)
+                    )
+                    
+                    predictedPos = part.CFrame * clamped
+                end
+                
+                return CFrame.new(predictedPos)
+            end
+        end
+    end
+    return oldindex(self, Index)
+end
