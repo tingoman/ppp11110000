@@ -5,6 +5,9 @@ local UIS = game:GetService("UserInputService")
 local Camera = workspace.CurrentCamera
 local LocalPlayer = Players.LocalPlayer
 
+-- Game check
+local HoodCustoms = game.GameId == 9825515356
+
 -- Initialize metatable hook
 local grm = getrawmetatable(game)
 local oldindex = grm.__index
@@ -180,7 +183,7 @@ local function aimAtTarget(player)
         )
 
     if drift and drift.Enabled then
-        predicted = predicted + Vector3.new(drift.X, drift.Y, 0) -- Removed Z axis for drift
+        predicted = predicted + Vector3.new(drift.X, drift.Y, 0)
     end
 
     if tremor and tremor.Enabled then
@@ -227,9 +230,10 @@ RunService.RenderStepped:Connect(function()
     end
 end)
 
+-- Unified silent aim hook with HoodCustoms check
 grm.__index = function(self, Index)
     if not checkcaller() and self == LocalPlayer:GetMouse() then
-        if (Index == "Hit" or Index == "Target") and getgenv().Etiquette.SilentAim.Enabled and AimbotActive and SilentTarget and SilentTarget.Character then
+        if (Index == "Hit" or (Index == "Target" and game.PlaceId == 2788229376)) and getgenv().Etiquette.SilentAim.Enabled and AimbotActive and SilentTarget and SilentTarget.Character then
             local part = getSilentAimTargetPart(SilentTarget.Character)
             if part then
                 local predictedPos = part.Position
@@ -239,24 +243,25 @@ grm.__index = function(self, Index)
                     predictedPos = predictedPos + (part.Velocity * (getgenv().Etiquette.SilentAim.Prediction.Strength or 0))
                 end
                 
-                -- Apply clamping if using ClosestPart method
-                local silentMethod = getgenv().Etiquette.Aimbot.Settings.Targetting.SilentMethod
-                if silentMethod and silentMethod.PartMethod == "ClosestPart" then
-                    local mousePos = UIS:GetMouseLocation()
-                    local mouseRay = Camera:ViewportPointToRay(mousePos.X, mousePos.Y)
-                    
-                    -- Fixed this line - added missing parenthesis
-                    local transformed = part.CFrame:PointToObjectSpace(
-                        mouseRay.Origin + (mouseRay.Direction * mouseRay.Direction:Dot(part.CFrame.Position - mouseRay.Origin)))
-                    
-                    local partSize = part.Size * (0.93 / 2)
-                    local clamped = Vector3.new(
-                        math.clamp(transformed.X, -partSize.X, partSize.X),
-                        math.clamp(transformed.Y, -partSize.Y, partSize.Y),
-                        math.clamp(transformed.Z, -partSize.Z, partSize.Z)
-                    )
-                    
-                    predictedPos = part.CFrame * clamped
+                -- Skip clamping for HoodCustoms
+                if not HoodCustoms then
+                    local silentMethod = getgenv().Etiquette.Aimbot.Settings.Targetting.SilentMethod
+                    if silentMethod and silentMethod.PartMethod == "ClosestPart" then
+                        local mousePos = UIS:GetMouseLocation()
+                        local mouseRay = Camera:ViewportPointToRay(mousePos.X, mousePos.Y)
+                        
+                        local transformed = part.CFrame:PointToObjectSpace(
+                            mouseRay.Origin + (mouseRay.Direction * mouseRay.Direction:Dot(part.CFrame.Position - mouseRay.Origin)))
+                        
+                        local partSize = part.Size * (0.93 / 2)
+                        local clamped = Vector3.new(
+                            math.clamp(transformed.X, -partSize.X, partSize.X),
+                            math.clamp(transformed.Y, -partSize.Y, partSize.Y),
+                            math.clamp(transformed.Z, -partSize.Z, partSize.Z)
+                        )
+                        
+                        predictedPos = part.CFrame * clamped
+                    end
                 end
                 
                 return CFrame.new(predictedPos)
